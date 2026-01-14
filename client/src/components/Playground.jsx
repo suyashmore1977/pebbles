@@ -162,28 +162,50 @@ const Playground = () => {
     };
 
     const processTranscript = useCallback(async (spokenText) => {
-        if (!spokenText.trim()) {
+        if (!spokenText || !spokenText.trim()) {
             setStatus("I didn't catch that. Tap mic to try again.");
             setConversationState('IDLE');
             return;
         }
+
+        if (!activeForm || !activeForm.fields) {
+            console.error("No active form!");
+            setStatus("Error: No form selected.");
+            setConversationState('IDLE');
+            return;
+        }
+
         setConversationState('PROCESSING');
         setStatus("Processing...");
 
         try {
+            console.log("API URL:", API_URL);
+            console.log("Sending to analyze-form:", spokenText);
+
             const response = await axios.post(`${API_URL}/analyze-form`, {
                 formFields: activeForm.fields,
                 transcript: spokenText,
-                existingValues: formValuesRef.current
+                existingValues: formValuesRef.current || {}
             });
-            const { values, missingFields: missing, isComplete } = response.data;
+
+            // Defensive: ensure response.data exists
+            if (!response || !response.data) {
+                throw new Error("Empty response from server");
+            }
+
+            const values = response.data.values || {};
+            const missing = response.data.missingFields || [];
+            const isComplete = response.data.isComplete || false;
 
             if (values && Object.keys(values).length > 0) {
                 setStatus("AI Speaking...");
                 try {
                     const ackResponse = await axios.post(`${API_URL}/chat`, { state: 'FILLING', context: { formTitle: activeForm?.title } });
-                    await speak(ackResponse.data.reply);
-                } catch (e) { await speak("Got it! Filling that in."); }
+                    await speak(ackResponse.data?.reply || "Got it!");
+                } catch (e) {
+                    console.warn("Chat API error, using fallback:", e);
+                    await speak("Got it! Filling that in.");
+                }
                 await simulateTyping(values);
             }
 
@@ -192,22 +214,36 @@ const Playground = () => {
                 setMissingFields([]);
                 try {
                     const doneResponse = await axios.post(`${API_URL}/chat`, { state: 'DONE', context: { formTitle: activeForm?.title } });
-                    await speak(doneResponse.data.reply);
-                } catch (e) { await speak("All done! Check it out."); }
+                    await speak(doneResponse.data?.reply || "All done!");
+                } catch (e) {
+                    await speak("All done! Check it out.");
+                }
                 setConversationState('DONE');
             } else {
                 setMissingFields(missing);
-                setStatus(`Missing: ${missing.slice(0, 3).join(', ')}...`);
+                const missingPreview = Array.isArray(missing) && missing.length > 0
+                    ? missing.slice(0, 3).join(', ')
+                    : 'some fields';
+                setStatus(`Missing: ${missingPreview}...`);
+
                 try {
-                    const askResponse = await axios.post(`${API_URL}/chat`, { state: 'ASK_MISSING', context: { formTitle: activeForm?.title }, missingFields: missing });
-                    await speak(askResponse.data.reply);
-                } catch (e) { await speak(`I still need your ${missing.slice(0, 2).join(' and ')}. What are those?`); }
+                    const askResponse = await axios.post(`${API_URL}/chat`, {
+                        state: 'ASK_MISSING',
+                        context: { formTitle: activeForm?.title },
+                        missingFields: missing
+                    });
+                    await speak(askResponse.data?.reply || `I still need ${missingPreview}.`);
+                } catch (e) {
+                    const fieldList = Array.isArray(missing) ? missing.slice(0, 2).join(' and ') : 'more info';
+                    await speak(`I still need your ${fieldList}. What are those?`);
+                }
                 setConversationState('LISTENING');
                 setStatus("Listening for more info...");
                 await startListening();
             }
         } catch (error) {
-            console.error("Error:", error);
+            console.error("ProcessTranscript Error:", error);
+            console.error("Error details:", error.response?.data || error.message);
             setStatus("Error occurred. Tap to retry.");
             setConversationState('IDLE');
         }
