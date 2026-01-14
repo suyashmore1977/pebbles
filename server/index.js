@@ -9,24 +9,55 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+// API Key Rotation Setup
+const API_KEYS = [
+    process.env.GEMINI_API_KEY_1,
+    process.env.GEMINI_API_KEY_2,
+    process.env.GEMINI_API_KEY_3
+].filter(Boolean); // Remove undefined keys
+
+console.log(`Loaded ${API_KEYS.length} API keys for rotation`);
+
+let currentKeyIndex = 0;
+let genAI = new GoogleGenerativeAI(API_KEYS[currentKeyIndex]);
 const MODEL_NAME = "gemini-2.0-flash";
+
+// Function to rotate to next API key
+function rotateApiKey() {
+    currentKeyIndex = (currentKeyIndex + 1) % API_KEYS.length;
+    genAI = new GoogleGenerativeAI(API_KEYS[currentKeyIndex]);
+    console.log(`Rotated to API key ${currentKeyIndex + 1}/${API_KEYS.length}`);
+    return genAI;
+}
+
+// Health check endpoint
+app.get('/', (req, res) => {
+    res.json({
+        status: 'ok',
+        model: MODEL_NAME,
+        apiKeys: API_KEYS.length,
+        currentKey: currentKeyIndex + 1,
+        timestamp: new Date().toISOString()
+    });
+});
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 2000) {
+async function retryWithBackoff(fn, maxRetries = 3, initialDelay = 1000) {
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
             return await fn();
         } catch (error) {
             const isRateLimit = error.message?.includes('429') ||
                 error.message?.includes('Too Many Requests') ||
-                error.message?.includes('RESOURCE_EXHAUSTED');
+                error.message?.includes('RESOURCE_EXHAUSTED') ||
+                error.message?.includes('quota');
 
             if (isRateLimit && attempt < maxRetries - 1) {
-                const waitTime = initialDelay * Math.pow(2, attempt);
-                console.log(`Rate limited. Waiting ${waitTime}ms...`);
-                await delay(waitTime);
+                // Rotate to next API key instead of just waiting
+                rotateApiKey();
+                console.log(`Rate limited on attempt ${attempt + 1}. Trying next key...`);
+                await delay(500); // Brief delay before retry
             } else {
                 throw error;
             }
